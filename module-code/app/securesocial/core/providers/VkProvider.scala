@@ -1,15 +1,19 @@
 package securesocial.core.providers
 
-import play.api.libs.ws.WS
-import play.api.{Application, Logger}
 import play.api.libs.json.JsObject
 import securesocial.core._
+import securesocial.core.services.{ CacheService, RoutesService }
 
+import scala.concurrent.Future
 
 /**
  * A Vk provider
  */
-class VkProvider(application: Application) extends OAuth2Provider(application) {
+class VkProvider(
+  routesService: RoutesService,
+  cacheService: CacheService,
+  client: OAuth2Client)
+  extends OAuth2Provider(routesService, client, cacheService) {
   val GetProfilesApi = "https://api.vk.com/method/getProfiles?fields=uid,first_name,last_name,photo&access_token="
   val Response = "response"
   val Id = "uid"
@@ -20,44 +24,33 @@ class VkProvider(application: Application) extends OAuth2Provider(application) {
   val ErrorCode = "error_code"
   val ErrorMessage = "error_msg"
 
-  def fillProfile(user: SocialUser) = {
-    val accessToken = user.oAuth2Info.get.accessToken
-    val promise = WS.url(GetProfilesApi + accessToken).get()
+  override val id = VkProvider.Vk
 
-    try {
-      val response = awaitResult(promise)
-      val json = response.json
+  def fillProfile(info: OAuth2Info): Future[BasicProfile] = {
+    val accessToken = info.accessToken
+    client.retrieveProfile(GetProfilesApi + accessToken).map { json =>
       (json \ Error).asOpt[JsObject] match {
         case Some(error) =>
           val message = (error \ ErrorMessage).as[String]
           val errorCode = (error \ ErrorCode).as[Int]
-          Logger.error("[securesocial] error retrieving profile information from Vk. Error code = %s, message = %s"
-            .format(errorCode, message))
+          logger.error(
+            s"[securesocial] error retrieving profile information from Vk. Error code = $errorCode, message = $message")
           throw new AuthenticationException()
         case _ =>
           val me = (json \ Response).apply(0)
-          val userId = (me \ Id).as[Long]
-          val firstName = (me \ FirstName).as[String]
-          val lastName = (me \ LastName).as[String]
+          val userId = (me \ Id).as[Long].toString
+          val firstName = (me \ FirstName).asOpt[String]
+          val lastName = (me \ LastName).asOpt[String]
           val avatarUrl = (me \ Photo).asOpt[String]
-          user.copy(
-            identityId = IdentityId(userId.toString, id),
-            firstName = firstName,
-            lastName = lastName,
-            fullName = firstName + " " + lastName,
-            avatarUrl = avatarUrl,
-            email = None
-          )
+          BasicProfile(id, userId, firstName, lastName, None, None, avatarUrl, authMethod, oAuth2Info = Some(info))
       }
-    } catch {
-      case e: Exception => {
-        Logger.error("[securesocial] error retrieving profile information from VK", e)
+    } recover {
+      case e: AuthenticationException => throw e
+      case e: Exception =>
+        logger.error("[securesocial] error retrieving profile information from VK", e)
         throw new AuthenticationException()
-      }
     }
   }
-
-  def id = VkProvider.Vk
 }
 
 object VkProvider {

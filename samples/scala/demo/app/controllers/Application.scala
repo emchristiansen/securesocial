@@ -16,32 +16,41 @@
  */
 package controllers
 
-import play.api.mvc._
-import securesocial.core.{Identity, Authorization}
+import javax.inject.Inject
 
-object Application extends Controller with securesocial.core.SecureSocial {
+import play.api.mvc.{ ControllerComponents, RequestHeader }
+import securesocial.core._
+import service.{ DemoUser, MyEnvironment }
 
+class Application @Inject() (val controllerComponents: ControllerComponents)(override implicit val env: MyEnvironment)
+  extends securesocial.core.SecureSocialController {
   def index = SecuredAction { implicit request =>
-    Ok(views.html.index(request.user))
+    Ok(views.html.index(request.user.main))
   }
 
-  // a sample action using the new authorization hook
+  // a sample action using an authorization implementation
   def onlyTwitter = SecuredAction(WithProvider("twitter")) { implicit request =>
-//
-//    Note: If you had a User class and returned an instance of it from UserService, this
-//          is how you would convert Identity to your own class:
-//
-//    request.user match {
-//      case user: User => // do whatever you need with your user class
-//      case _ => // did not get a User instance, should not happen,log error/thow exception
-//    }
     Ok("You can see this because you logged in using Twitter")
+  }
+
+  def linkResult = SecuredAction { implicit request =>
+    Ok(views.html.linkResult(request.user))
+  }
+
+  /**
+   * Sample use of SecureSocial.currentUser. Access the /current-user to test it
+   */
+  def currentUser = Action.async { implicit request =>
+    SecureSocial.currentUser.map { maybeUser =>
+      val userId = maybeUser.map(_.main.userId).getOrElse("unknown")
+      Ok(s"Your id is $userId")
+    }
   }
 }
 
 // An Authorization implementation that only authorizes uses that logged in using twitter
-case class WithProvider(provider: String) extends Authorization {
-  def isAuthorized(user: Identity) = {
-    user.identityId.providerId == provider
+case class WithProvider(provider: String) extends Authorization[DemoUser] {
+  def isAuthorized(user: DemoUser, request: RequestHeader) = {
+    user.main.providerId == provider
   }
 }
