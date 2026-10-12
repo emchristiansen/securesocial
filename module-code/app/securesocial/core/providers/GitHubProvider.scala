@@ -1,5 +1,5 @@
 /**
- * Copyright 2012 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
+ * Copyright 2012-2014 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,20 +16,21 @@
  */
 package securesocial.core.providers
 
+import play.api.libs.ws.WSResponse
 import securesocial.core._
-import play.api.{Logger, Application}
-import play.api.libs.ws.WS
-import securesocial.core.IdentityId
-import securesocial.core.SocialUser
-import play.api.libs.ws.Response
-import securesocial.core.AuthenticationException
-import scala.Some
+import securesocial.core.services.{ CacheService, RoutesService }
+
+import scala.concurrent.Future
 
 /**
  * A GitHub provider
  *
  */
-class GitHubProvider(application: Application) extends OAuth2Provider(application) {
+class GitHubProvider(
+  routesService: RoutesService,
+  cacheService: CacheService,
+  client: OAuth2Client)
+  extends OAuth2Provider(routesService, client, cacheService) {
   val GetAuthenticatedUser = "https://api.github.com/user?access_token=%s"
   val AccessToken = "access_token"
   val TokenType = "token_type"
@@ -39,52 +40,41 @@ class GitHubProvider(application: Application) extends OAuth2Provider(applicatio
   val AvatarUrl = "avatar_url"
   val Email = "email"
 
-  override def id = GitHubProvider.GitHub
+  override val id = GitHubProvider.GitHub
 
-  override protected def buildInfo(response: Response): OAuth2Info = {
-    response.body.split("&|=") match {
-      case Array(AccessToken, token, TokenType, tokenType) => OAuth2Info(token, Some(tokenType), None)
-      case _ =>
-        Logger.error("[securesocial] invalid response format for accessToken")
-        throw new AuthenticationException()
+  override protected def buildInfo(response: WSResponse): OAuth2Info = {
+    val values: Map[String, String] = response.body.split("&").map(_.split("=")).withFilter(_.size == 2)
+      .map(r => (r(0), r(1)))(collection.breakOut)
+    val accessToken = values.get(OAuth2Constants.AccessToken)
+    if (accessToken.isEmpty) {
+      logger.error(s"[securesocial] did not get accessToken from $id")
+      throw new AuthenticationException()
     }
+    OAuth2Info(
+      accessToken.get,
+      values.get(OAuth2Constants.TokenType),
+      values.get(OAuth2Constants.ExpiresIn).map(_.toInt),
+      values.get(OAuth2Constants.RefreshToken))
   }
 
-  /**
-   * Subclasses need to implement this method to populate the User object with profile
-   * information from the service provider.
-   *
-   * @param user The user object to be populated
-   * @return A copy of the user object with the new values set
-   */
-  def fillProfile(user: SocialUser): SocialUser = {
-    val promise = WS.url(GetAuthenticatedUser.format(user.oAuth2Info.get.accessToken)).get()
-    try {
-      val response = awaitResult(promise)
-      val me = response.json
+  def fillProfile(info: OAuth2Info): Future[BasicProfile] = {
+    client.retrieveProfile(GetAuthenticatedUser.format(info.accessToken)).map { me =>
       (me \ Message).asOpt[String] match {
-        case Some(msg) => {
-          Logger.error("[securesocial] error retrieving profile information from GitHub. Message = %s".format(msg))
+        case Some(msg) =>
+          logger.error(s"[securesocial] error retrieving profile information from GitHub. Message = $msg")
           throw new AuthenticationException()
-        }
-        case _ => {
+        case _ =>
           val userId = (me \ Id).as[Int]
-          val displayName = (me \ Name).asOpt[String].getOrElse("")
+          val displayName = (me \ Name).asOpt[String]
           val avatarUrl = (me \ AvatarUrl).asOpt[String]
-          val email = (me \ Email).asOpt[String].filter( !_.isEmpty )
-          user.copy(
-            identityId = IdentityId(userId.toString, id),
-            fullName = displayName,
-            avatarUrl = avatarUrl,
-            email = email
-          )
-        }
+          val email = (me \ Email).asOpt[String].filter(!_.isEmpty)
+          BasicProfile(id, userId.toString, None, None, displayName, email, avatarUrl, authMethod, oAuth2Info = Some(info))
       }
-    } catch {
-      case e: Exception => {
-        Logger.error( "[securesocial] error retrieving profile information from github", e)
+    } recover {
+      case e: AuthenticationException => throw e
+      case e =>
+        logger.error("[securesocial] error retrieving profile information from github", e)
         throw new AuthenticationException()
-      }
     }
   }
 }

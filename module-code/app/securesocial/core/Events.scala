@@ -1,5 +1,5 @@
 /**
- * Copyright 2013 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
+ * Copyright 2013-2014 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,58 +16,52 @@
  */
 package securesocial.core
 
-import play.api.mvc.{Session, RequestHeader}
-import play.api.{Logger, Plugin}
+import play.api.mvc.{ Controller, Session, RequestHeader }
 
 /**
  * A trait to model SecureSocial events
  */
-sealed trait Event { def user: Identity }
+abstract class Event[U](val user: U)
+
+object Event {
+  def unapply[U](event: Event[U]) = Some(event.user)
+}
 
 /**
  * The event fired when a users logs in
  * @param user
  */
-case class LoginEvent(user: Identity) extends Event
+case class LoginEvent[U](override val user: U) extends Event(user)
 
 /**
  * The event fired when a user logs out
  * @param user
  */
-case class LogoutEvent(user: Identity) extends Event
+case class LogoutEvent[U](override val user: U) extends Event(user)
 
 /**
  * The event fired when a user sings up with the Username and Password Provider
  * @param user
  */
-case class SignUpEvent(user: Identity) extends Event
+case class SignUpEvent[U](override val user: U) extends Event(user)
 
 /**
  * The event fired when a user changes his password
  * @param user
  */
-case class PasswordChangeEvent(user: Identity) extends Event
+case class PasswordChangeEvent[U](override val user: U) extends Event(user)
 
 /**
  * The event fired when a user completes a password reset
  * @param user
  */
-case class PasswordResetEvent(user: Identity) extends Event
+case class PasswordResetEvent[U](override val user: U) extends Event(user)
 
 /**
  * The event listener interface
  */
-abstract class EventListener extends Plugin with Registrable {
-  override def onStart() {
-    Logger.info("[securesocial] loaded event listener %s".format(id))
-    Registry.eventListeners.register(this)
-  }
+abstract class EventListener {
 
-
-  override def onStop() {
-    Logger.info("[securesocial] unloaded event listener %s".format(id))
-    Registry.eventListeners.unRegister(id)
-  }
   /**
    * The method that gets called when an event occurs.
    *
@@ -76,7 +70,7 @@ abstract class EventListener extends Plugin with Registrable {
    * @param session the current session (if you need to manipulate it don't use the one in request.session)
    * @return can return an optional Session object.
    */
-  def onEvent(event: Event, request: RequestHeader, session: Session): Option[Session]
+  def onEvent[U](event: Event[U], request: RequestHeader, session: Session): Option[Session]
 }
 
 /**
@@ -84,20 +78,19 @@ abstract class EventListener extends Plugin with Registrable {
  */
 object Events {
 
-  def doFire(list: List[EventListener], event: Event,
-             request: RequestHeader, session: Session): Session =
-  {
-    if ( list.isEmpty ) {
-      session
-    } else {
-      val newSession = list.head.onEvent(event, request, session)
-      doFire(list.tail, event, request, newSession.getOrElse(session))
+  def doFire[U](list: Seq[EventListener], event: Event[U],
+    request: RequestHeader, session: Session): Session =
+    {
+      if (list.isEmpty) {
+        session
+      } else {
+        val newSession = list.head.onEvent(event, request, session)
+        doFire(list.tail, event, request, newSession.getOrElse(session))
+      }
     }
-  }
 
-  def fire(event: Event)(implicit request: RequestHeader): Option[Session] = {
-    val listeners = Registry.eventListeners.all().toList.map(_._2)
-    val result = doFire(listeners, event, request, request.session)
-    if ( result == request.session ) None else Some(result)
+  def fire[U](event: Event[U])(implicit request: RequestHeader, env: RuntimeEnvironment): Option[Session] = {
+    val result = doFire(env.eventListeners, event, request, request.session)
+    if (result == request.session) None else Some(result)
   }
 }

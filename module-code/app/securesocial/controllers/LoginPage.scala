@@ -1,5 +1,5 @@
 /**
- * Copyright 2012 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
+ * Copyright 2012-2014 Jorge Aliss (jaliss at gmail dot com) - twitter: @jaliss
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,45 +16,64 @@
  */
 package securesocial.controllers
 
-import play.api.mvc.{Session, DiscardingCookie, Action, Controller}
-import securesocial.core._
-import play.api.Play
-import Play.current
-import providers.UsernamePasswordProvider
-import providers.utils.RoutesHelper
-import play.Logger
+import javax.inject.Inject
 
+import play.api.mvc.ControllerComponents
+import securesocial.core._
+import securesocial.core.utils._
+import play.api.{ Configuration, Play }
+import providers.UsernamePasswordProvider
+
+import scala.concurrent.Future
+import play.filters.csrf.CSRFAddToken
 
 /**
- * The Login page controller
+ * A default Login controller that uses BasicProfile as the user type.
+ *
+ * @param env An environment
  */
-object LoginPage extends Controller
-{
+class LoginPage @Inject() (
+  override implicit val env: RuntimeEnvironment,
+  val csrfAddToken: CSRFAddToken,
+  val controllerComponents: ControllerComponents) extends BaseLoginPage
+
+/**
+ * The trait that defines the login page controller
+ */
+trait BaseLoginPage extends SecureSocial {
+  private val logger = play.api.Logger("securesocial.controllers.LoginPage")
+
   /**
    * The property that specifies the page the user is redirected to after logging out.
    */
   val onLogoutGoTo = "securesocial.onLogoutGoTo"
 
+  val csrfAddToken: CSRFAddToken
+  val configuration: Configuration = env.configuration
+
   /**
    * Renders the login page
    * @return
    */
-  def login = Action { implicit request =>
-    val to = ProviderController.landingUrl
-    if ( SecureSocial.currentUser.isDefined ) {
-      // if the user is already logged in just redirect to the app
-      if ( Logger.isDebugEnabled() ) {
-        Logger.debug("User already logged in, skipping login page. Redirecting to %s".format(to))
-      }
-      Redirect( to )
-    } else {
-      import com.typesafe.plugin._
-      if ( SecureSocial.enableRefererAsOriginalUrl ) {
-        SecureSocial.withRefererAsOriginalUrl(Ok(use[TemplatesPlugin].getLoginPage(request, UsernamePasswordProvider.loginForm)))
+  def login = csrfAddToken {
+    UserAwareAction { implicit request =>
+      if (request.user.isDefined) {
+        // if the user is already logged in, a referer is set and we handle the
+        // referer the same way as an OriginalUrl in the session, we redirect back
+        // to this URL. Otherwise, just redirect to the application's landing page
+        val to = (if (env.enableRefererAsOriginalUrl.value) {
+          SecureSocial.refererPathAndQuery
+        } else {
+          None
+        }).getOrElse(ProviderControllerHelper.landingUrl(configuration))
+        logger.debug("User already logged in, skipping login page. Redirecting to %s".format(to))
+        Redirect(to)
       } else {
-        import Play.current
-        Ok(use[TemplatesPlugin].getLoginPage(request, UsernamePasswordProvider.loginForm))
-
+        if (env.enableRefererAsOriginalUrl.value) {
+          SecureSocial.withRefererAsOriginalUrl(Ok(env.viewTemplates.getLoginPage(UsernamePasswordProvider.loginForm)))
+        } else {
+          Ok(env.viewTemplates.getLoginPage(UsernamePasswordProvider.loginForm))
+        }
       }
     }
   }
@@ -65,19 +84,19 @@ object LoginPage extends Controller
    *
    * @return
    */
-  def logout = Action { implicit request =>
-    val to = Play.configuration.getString(onLogoutGoTo).getOrElse(RoutesHelper.login().absoluteURL(IdentityProvider.sslEnabled))
-    val user = for (
-      authenticator <- SecureSocial.authenticatorFromRequest ;
-      user <- UserService.find(authenticator.identityId)
-    ) yield {
-      Authenticator.delete(authenticator.id)
-      user
-    }
-    val result = Redirect(to).discardingCookies(Authenticator.discardingCookie)
-    user match {
-      case Some(u) => result.withSession( Events.fire(new LogoutEvent(u)).getOrElse(session) )
-      case None => result
-    }
+  def logout = UserAwareAction.async {
+    implicit request =>
+      val redirectTo = Redirect(configuration.get[Option[String]](onLogoutGoTo).getOrElse(env.routes.loginPageUrl))
+      val result = for {
+        user <- request.user
+        authenticator <- request.authenticator
+      } yield {
+        redirectTo.discardingAuthenticator(authenticator).map {
+          _.withSession(Events.fire(LogoutEvent(user)).getOrElse(request.session))
+        }
+      }
+      result.getOrElse {
+        Future.successful(redirectTo)
+      }
   }
 }
